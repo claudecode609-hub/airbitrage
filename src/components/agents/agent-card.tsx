@@ -1,16 +1,25 @@
+import { memo } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StatusDot } from '@/components/shared/status-dot';
-import { timeAgo } from '@/lib/utils';
-import { Agent, AGENT_TYPES } from '@/types';
+import { AGENT_TYPES, AgentType, AgentStatus } from '@/types';
 import Link from 'next/link';
 
 interface AgentCardProps {
-  agent: Agent;
+  agentType: AgentType;
+  liveStatus: 'idle' | 'queued' | 'running' | 'completed' | 'error';
+  liveOpportunities: number;
+  onRun: () => void;
 }
 
-export function AgentCard({ agent }: AgentCardProps) {
-  const info = AGENT_TYPES[agent.type];
+export const AgentCard = memo(function AgentCard({ agentType, liveStatus, liveOpportunities, onRun }: AgentCardProps) {
+  const info = AGENT_TYPES[agentType];
+
+  const isBusy = liveStatus === 'running' || liveStatus === 'queued';
+  const displayStatus: AgentStatus = liveStatus === 'running' ? 'running'
+    : liveStatus === 'queued' ? 'queued'
+    : liveStatus === 'error' ? 'error'
+    : 'idle';
 
   return (
     <Card hover className="flex flex-col gap-3">
@@ -25,8 +34,10 @@ export function AgentCard({ agent }: AgentCardProps) {
           <div>
             <div className="text-sm font-medium text-[var(--text-primary)]">{info.name}</div>
             <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-tertiary)]">
-              <StatusDot status={agent.status} />
-              <span className="capitalize">{agent.status}</span>
+              <StatusDot status={displayStatus} />
+              <span className="capitalize">
+                {liveStatus === 'completed' ? `done · ${liveOpportunities} found` : displayStatus}
+              </span>
             </div>
           </div>
         </div>
@@ -35,41 +46,32 @@ export function AgentCard({ agent }: AgentCardProps) {
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div>
           <div className="text-[var(--text-tertiary)]">Opportunities</div>
-          <div className="font-mono-numbers font-medium text-[var(--text-primary)]">{agent.totalOpportunities}</div>
+          <div className="font-mono-numbers font-medium text-[var(--text-primary)]">{liveOpportunities}</div>
         </div>
         <div>
-          <div className="text-[var(--text-tertiary)]">Total runs</div>
-          <div className="font-mono-numbers font-medium text-[var(--text-primary)]">{agent.totalRuns}</div>
-        </div>
-        <div>
-          <div className="text-[var(--text-tertiary)]">Last run</div>
-          <div className="text-[var(--text-primary)]">
-            {agent.lastRunAt ? timeAgo(agent.lastRunAt) : 'Never'}
-          </div>
-        </div>
-        <div>
-          <div className="text-[var(--text-tertiary)]">Cost/run</div>
-          <div className="font-mono-numbers text-[var(--text-primary)]">
-            ${agent.lastRunCost?.toFixed(2) ?? '—'}
+          <div className="text-[var(--text-tertiary)]">Sources</div>
+          <div className="text-[var(--text-primary)] truncate text-[10px]">
+            {info.sources.slice(0, 2).join(', ')}
           </div>
         </div>
       </div>
 
       <div className="flex items-center gap-2 pt-1">
-        <Link href={`/agents/${agent.type}`} className="flex-1">
+        <Link href={`/agents/${agentType}`} className="flex-1">
           <Button variant="secondary" size="sm" className="w-full">
             View
           </Button>
         </Link>
         <Button
-          variant={agent.status === 'running' ? 'ghost' : 'primary'}
+          variant={isBusy ? 'ghost' : 'primary'}
           size="sm"
-          disabled={agent.status === 'running'}
+          disabled={isBusy}
+          onClick={onRun}
           className="flex-1"
         >
-          {agent.status === 'running' ? 'Running…' : 'Run Now'}
+          {liveStatus === 'queued' ? 'Queued…' : liveStatus === 'running' ? 'Running…' : 'Run Now'}
         </Button>
       </div>
     </Card>
   );
-}
+});

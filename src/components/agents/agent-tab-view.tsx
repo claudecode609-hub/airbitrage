@@ -9,6 +9,7 @@ import { StatusDot } from '@/components/shared/status-dot';
 import { OpportunityCard } from '@/components/opportunities/opportunity-card';
 import { EmptyState } from '@/components/shared/empty-state';
 import { formatCents, timeAgo } from '@/lib/utils';
+import { useAgentRun } from '@/hooks/useAgentRun';
 import { Agent, Opportunity, AgentRun, AGENT_TYPES, AgentType } from '@/types';
 
 interface AgentTabViewProps {
@@ -23,12 +24,48 @@ type SubTab = 'feed' | 'controls' | 'history';
 export function AgentTabView({ agentType, agent, opportunities, runs }: AgentTabViewProps) {
   const [activeTab, setActiveTab] = useState<SubTab>('feed');
   const info = AGENT_TYPES[agentType];
+  const agentRun = useAgentRun(agentType);
 
-  const totalProfit = opportunities.reduce((sum, o) => sum + o.estimatedProfit, 0);
-  const newOpps = opportunities.filter(o => o.status === 'new');
-  const avgConfidence = opportunities.length > 0
-    ? Math.round(opportunities.reduce((sum, o) => sum + o.confidence, 0) / opportunities.length)
+  // Convert live-discovered opportunities into full Opportunity objects
+  const liveOpps: Opportunity[] = agentRun.opportunities.map((o, i) => ({
+    id: `live-${i}`,
+    agentRunId: 'live',
+    agentType,
+    userId: 'user',
+    title: o.title,
+    description: o.description,
+    buyPrice: o.buyPrice,
+    buySource: o.buySource,
+    buyUrl: o.buyUrl,
+    sellPrice: o.sellPrice,
+    sellSource: o.sellSource,
+    sellUrl: o.sellUrl,
+    estimatedProfit: o.estimatedProfit,
+    fees: o.fees,
+    confidence: o.confidence,
+    riskNotes: o.riskNotes,
+    reasoning: o.reasoning,
+    status: 'new' as const,
+    actualBuyPrice: null,
+    actualSellPrice: null,
+    createdAt: new Date().toISOString(),
+    expiresAt: null,
+  }));
+
+  const allOpportunities = [...liveOpps, ...opportunities];
+  const totalProfit = allOpportunities.reduce((sum, o) => sum + o.estimatedProfit, 0);
+  const newOpps = allOpportunities.filter(o => o.status === 'new');
+  const avgConfidence = allOpportunities.length > 0
+    ? Math.round(allOpportunities.reduce((sum, o) => sum + o.confidence, 0) / allOpportunities.length)
     : 0;
+
+  const isRunning = agentRun.status === 'running';
+  const isQueued = agentRun.status === 'queued';
+  const isBusy = isRunning || isQueued;
+
+  const handleRun = () => {
+    agentRun.runAgent();
+  };
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
@@ -47,22 +84,64 @@ export function AgentTabView({ agentType, agent, opportunities, runs }: AgentTab
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {agent && (
+          {(agent || isBusy) && (
             <div className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-              <StatusDot status={agent.status} />
-              <span className="capitalize">{agent.status}</span>
-              {agent.lastRunAt && <span className="text-[var(--text-tertiary)]">· {timeAgo(agent.lastRunAt)}</span>}
+              <StatusDot status={isRunning ? 'running' : isQueued ? 'queued' : (agent?.status || 'idle')} />
+              <span className="capitalize">{isQueued ? 'queued' : isRunning ? 'running' : agent?.status}</span>
+              {agent?.lastRunAt && !isBusy && <span className="text-[var(--text-tertiary)]">· {timeAgo(agent.lastRunAt)}</span>}
             </div>
           )}
-          <Button size="md" disabled={agent?.status === 'running'}>
-            {agent?.status === 'running' ? 'Running…' : 'Run Now'}
+          <Button size="md" disabled={isBusy} onClick={handleRun}>
+            {isQueued ? 'Queued…' : isRunning ? 'Running…' : 'Run Now'}
           </Button>
         </div>
       </div>
 
+      {/* Live progress indicator */}
+      {isBusy && agentRun.progress.length > 0 && (
+        <Card className="space-y-2 border-l-2" style={{ borderLeftColor: info.color }}>
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full animate-pulse-dot" style={{ background: info.color }} />
+            <span className="text-xs text-[var(--text-secondary)]">
+              {agentRun.progress[agentRun.progress.length - 1].message}
+            </span>
+          </div>
+          {agentRun.progress.length > 1 && (
+            <div className="space-y-1 max-h-32 overflow-y-auto">
+              {agentRun.progress.slice(-5).map((p, i) => (
+                <div key={i} className="text-[10px] text-[var(--text-tertiary)] pl-4">
+                  {p.message}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Run result summary */}
+      {agentRun.status === 'completed' && agentRun.stats && (
+        <Card className="flex items-center justify-between border-l-2 border-l-[var(--color-profit)]">
+          <div className="text-xs text-[var(--text-secondary)]">
+            Found <span className="text-[var(--color-profit)] font-medium">{agentRun.opportunities.length} opportunities</span>
+            {' · '}{(agentRun.stats.totalInputTokens + agentRun.stats.totalOutputTokens).toLocaleString()} tokens
+            {' · '}{agentRun.stats.totalToolCalls} tool calls
+            {' · '}${agentRun.stats.estimatedCost.toFixed(4)} cost
+          </div>
+          <Button variant="ghost" size="sm" onClick={agentRun.reset}>Dismiss</Button>
+        </Card>
+      )}
+
+      {/* Run error */}
+      {agentRun.status === 'error' && agentRun.error && (
+        <Card className="border-l-2 border-l-[var(--color-danger)]">
+          <div className="text-xs text-[var(--color-danger)]">{agentRun.error}</div>
+          <Button variant="ghost" size="sm" onClick={agentRun.reset} className="mt-2">Dismiss</Button>
+        </Card>
+      )}
+
       {/* Stats Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Opportunities" value={newOpps.length.toString()} detail={`${opportunities.length} total`} accentColor="var(--color-accent)" />
+        <StatCard label="Opportunities" value={newOpps.length.toString()} detail={`${allOpportunities.length} total`} accentColor="var(--color-accent)" />
         <StatCard label="Est. Profit" value={formatCents(totalProfit)} accentColor="var(--color-profit)" />
         <StatCard label="Avg Confidence" value={`${avgConfidence}%`} />
         <StatCard label="Runs" value={(agent?.totalRuns ?? 0).toString()} detail={`$${(agent?.lastRunCost ?? 0).toFixed(2)} last cost`} />
@@ -94,7 +173,7 @@ export function AgentTabView({ agentType, agent, opportunities, runs }: AgentTab
       {/* Tab Content */}
       {activeTab === 'feed' && (
         <div>
-          {opportunities.length === 0 ? (
+          {allOpportunities.length === 0 ? (
             <EmptyState
               icon={info.icon}
               title="No opportunities yet"
@@ -102,7 +181,7 @@ export function AgentTabView({ agentType, agent, opportunities, runs }: AgentTab
             />
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {opportunities
+              {allOpportunities
                 .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
                 .map((opp) => (
                   <OpportunityCard key={opp.id} opportunity={opp} showAgentType={false} />

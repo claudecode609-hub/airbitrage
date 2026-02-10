@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# airbitrage local data (API keys, token usage)
+.airbitrage/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

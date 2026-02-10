@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ConfidenceBar } from '@/components/shared/confidence-bar';
@@ -10,7 +11,7 @@ interface OpportunityCardProps {
   showAgentType?: boolean;
 }
 
-export function OpportunityCard({ opportunity, showAgentType = true }: OpportunityCardProps) {
+export const OpportunityCard = memo(function OpportunityCard({ opportunity, showAgentType = true }: OpportunityCardProps) {
   const agentInfo = AGENT_TYPES[opportunity.agentType];
 
   return (
@@ -65,6 +66,32 @@ export function OpportunityCard({ opportunity, showAgentType = true }: Opportuni
         </div>
       </div>
 
+      {/* Buy / Sell quick links */}
+      {(opportunity.buyUrl || opportunity.sellUrl) && (
+        <div className="flex items-center gap-2 pt-1 border-t border-[var(--border-subtle)]">
+          {opportunity.buyUrl && (
+            <a
+              href={opportunity.buyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 text-center text-[11px] font-medium py-1.5 px-2 rounded-[var(--radius-sm)] bg-[var(--color-accent-dim)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--bg-primary)] transition-colors"
+            >
+              Buy — {opportunity.buySource}
+            </a>
+          )}
+          {opportunity.sellUrl && (
+            <a
+              href={opportunity.sellUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 text-center text-[11px] font-medium py-1.5 px-2 rounded-[var(--radius-sm)] bg-[rgba(34,197,94,0.1)] text-[var(--color-profit)] hover:bg-[var(--color-profit)] hover:text-[var(--bg-primary)] transition-colors"
+            >
+              Sell — {opportunity.sellSource}
+            </a>
+          )}
+        </div>
+      )}
+
       {opportunity.riskNotes.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {opportunity.riskNotes.slice(0, 2).map((note, i) => (
@@ -76,4 +103,4 @@ export function OpportunityCard({ opportunity, showAgentType = true }: Opportuni
       )}
     </Card>
   );
-}
+});
