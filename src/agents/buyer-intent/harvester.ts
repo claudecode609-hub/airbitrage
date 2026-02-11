@@ -240,8 +240,21 @@ function parseHWFormat(title: string): ParsedHW | null {
   const haveSection = hwMatch[1].trim();
   const wantSection = hwMatch[2].trim();
 
-  const isPayment = /paypal|cash|venmo|zelle|money|\$/i.test(haveSection);
-  if (!isPayment) return null;
+  // [H] must contain payment indicator (PayPal, Cash, $, etc.)
+  const havePayment = /paypal|cash|venmo|zelle|money|\$/i.test(haveSection);
+  if (!havePayment) return null;
+
+  // CRITICAL: [W] must NOT be primarily payment words — that means it's a SELL post
+  // e.g. "[H] RTX 3080, PayPal [W] Local Cash" is a SELL, not a BUY
+  const wantPayment = /paypal|cash|venmo|zelle|money|\$/i.test(wantSection);
+  const wantClean = wantSection
+    .replace(/\[.*?\]/g, '')
+    .replace(/paypal|cash|venmo|zelle|money|local|g&s|goods\s*(?:&|and)\s*services|\$[\d,.]+/gi, '')
+    .replace(/,/g, '')
+    .trim();
+
+  // If [W] is ONLY payment words (nothing left after stripping), it's a SELL post
+  if (wantPayment && wantClean.length < 3) return null;
 
   const price = extractPrice(haveSection);
 
