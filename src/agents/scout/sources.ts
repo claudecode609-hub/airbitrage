@@ -56,9 +56,16 @@ export async function tavilyBatchSearch(
   maxResultsPerQuery = 5,
 ): Promise<ScoutLead[]> {
   const leads: ScoutLead[] = [];
+  let consecutiveErrors = 0;
 
   // Run searches sequentially with timeouts and delays
   for (let qi = 0; qi < queries.length; qi++) {
+    // Stop if rate-limited
+    if (consecutiveErrors >= 3) {
+      console.log(`[tavilyBatchSearch] Stopping early: ${consecutiveErrors} consecutive errors (rate limited). Processed ${qi}/${queries.length} queries, got ${leads.length} leads.`);
+      break;
+    }
+
     const query = queries[qi];
     try {
       const response = await fetch(TAVILY_API_URL, {
@@ -70,11 +77,17 @@ export async function tavilyBatchSearch(
           query,
           max_results: maxResultsPerQuery,
           include_raw_content: false,
-          include_answer: false,
+          include_answer: true,
         }),
       });
 
-      if (!response.ok) continue;
+      if (!response.ok) {
+        if (response.status === 429 || response.status === 433 || response.status >= 500) {
+          consecutiveErrors++;
+        }
+        continue;
+      }
+      consecutiveErrors = 0;
 
       const data = await response.json();
 
@@ -84,14 +97,23 @@ export async function tavilyBatchSearch(
 
         // Score URL quality — prefer actual item/listing pages over search/blog pages
         const urlQuality = scoreUrlQuality(url);
-        if (urlQuality === 'skip') continue; // Skip search result pages, aggregator indexes, etc.
+        if (urlQuality === 'skip') continue; // Skip truly useless pages (Google, Wikipedia, etc.)
+
+        // Try to extract price from title + snippet
+        let price = extractPrice(r.title + ' ' + snippet);
+
+        // For listing URLs without a price, try harder — check for price patterns in the full content
+        if (!price && urlQuality === 'listing' && r.content) {
+          // Try extracting from the full content (some listings embed the price deeper)
+          price = extractPrice(r.content as string);
+        }
 
         leads.push({
           title: r.title || '',
           url,
           snippet,
           source: extractDomain(url),
-          priceFound: extractPrice(r.title + ' ' + snippet),
+          priceFound: price,
           category: query,
         });
       }
@@ -1153,24 +1175,16 @@ function decodeHTMLEntities(text: string): string {
 function scoreUrlQuality(url: string): 'listing' | 'generic' | 'skip' {
   const lower = url.toLowerCase();
 
-  // Skip: search results pages, category pages, blog aggregators
+  // Skip: only very obviously useless pages
   const skipPatterns = [
     /google\.com\/search/,
     /bing\.com\/search/,
     /duckduckgo\.com/,
-    /\/search\?/,
-    /\/search\//,
-    /\/category\//,
-    /\/tag\//,
-    /\/blog\/?$/,
-    /\/news\/?$/,
-    /\/wiki\//,
     /wikipedia\.org/,
     /youtube\.com/,
-    /reddit\.com\/r\/\w+\/?$/,  // subreddit index (but allow individual posts)
     /\/about\/?$/,
     /\/contact\/?$/,
-    /\/faq/,
+    /\/faq\/?$/,
   ];
 
   for (const pattern of skipPatterns) {

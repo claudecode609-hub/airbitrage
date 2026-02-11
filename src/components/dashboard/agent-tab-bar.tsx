@@ -22,27 +22,35 @@ export function AgentTabBar() {
           const isActive = pathname === `/agents/${type}`;
           const isPlanned = !info.active;
 
+          if (isPlanned) {
+            return (
+              <span
+                key={type}
+                className="relative flex items-center gap-2 px-4 text-sm whitespace-nowrap text-[var(--text-tertiary)] opacity-50 cursor-default"
+              >
+                <span>{info.icon}</span>
+                <span>{info.shortName}</span>
+                <span className="text-[9px] uppercase tracking-wide text-[var(--text-tertiary)] opacity-70">
+                  Soon
+                </span>
+              </span>
+            );
+          }
+
           return (
             <Link
               key={type}
               href={`/agents/${type}`}
               className={cn(
                 'relative flex items-center gap-2 px-4 text-sm whitespace-nowrap transition-colors',
-                isPlanned
-                  ? 'text-[var(--text-tertiary)] opacity-50 cursor-default'
-                  : isActive
-                    ? 'text-[var(--text-primary)]'
-                    : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]',
+                isActive
+                  ? 'text-[var(--text-primary)]'
+                  : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]',
               )}
             >
               <span>{info.icon}</span>
               <span>{info.shortName}</span>
-              {isPlanned && (
-                <span className="text-[9px] uppercase tracking-wide text-[var(--text-tertiary)] opacity-70">
-                  Soon
-                </span>
-              )}
-              {isActive && !isPlanned && (
+              {isActive && (
                 <span
                   className="absolute bottom-0 left-4 right-4 h-[2px] rounded-full"
                   style={{ background: info.color }}

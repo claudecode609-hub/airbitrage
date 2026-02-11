@@ -4,7 +4,8 @@
  * No Claude tokens spent.
  */
 
-import { ScoutLead, CryptoPrice, DealFeedItem, extractAllPrices, extractPrice, isListingUrl, cleanTitleForSearch, BookLead } from './sources';
+import { ScoutLead, CryptoPrice, DealFeedItem, CollectibleLead, extractAllPrices, extractPrice, isListingUrl, cleanTitleForSearch, BookLead } from './sources';
+import type { SellPriceType } from '@/agents/base-agent';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -14,9 +15,10 @@ export interface QualifiedLead {
   buyPrice: number;        // cents
   buySource: string;
   buyUrl: string;
-  sellPriceEstimate: number; // cents — our best guess
+  sellPriceEstimate: number; // cents — our best guess (0 if unknown)
   sellSource: string;
   sellUrl: string;          // may be a search URL if no exact match
+  sellPriceType: SellPriceType; // how reliable the sell price is
   estimatedSpread: number;   // cents (sell - buy, before fees)
   spreadPercent: number;     // percentage
   confidence: 'high' | 'medium' | 'low';
@@ -100,20 +102,44 @@ export function filterLeadsWithPriceData(
   minSpreadPercent = 25,
 ): QualifiedLead[] {
   const qualified: QualifiedLead[] = [];
+  const unresearched: QualifiedLead[] = []; // Leads Claude should research
+  let noPrice = 0, noResale = 0, lowSpread = 0, lowPercent = 0, needsResearch = 0;
 
   for (const lead of leads) {
-    if (!lead.priceFound || lead.priceFound <= 0) continue;
+    if (!lead.priceFound || lead.priceFound <= 0) { noPrice++; continue; }
 
     // Check if we have resale data for this lead
     const resale = resalePriceData.get(lead.url) || resalePriceData.get(lead.title);
-    if (!resale || !resale.estimatedPrice) continue;
+    if (!resale) { noResale++; continue; }
+
+    // If resale lookup found no listing prices, pass to Claude as "research_needed"
+    if (resale.estimatedPrice === 0 || resale.priceType === 'research_needed') {
+      needsResearch++;
+      unresearched.push({
+        title: lead.title,
+        description: lead.snippet,
+        buyPrice: lead.priceFound,
+        buySource: lead.source,
+        buyUrl: lead.url,
+        sellPriceEstimate: 0,
+        sellSource: 'Unknown',
+        sellUrl: resale.url || `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanTitleForSearch(lead.title))}&LH_Sold=1&LH_Complete=1`,
+        sellPriceType: 'research_needed',
+        estimatedSpread: 0,
+        spreadPercent: 0,
+        confidence: 'low',
+        category: lead.category,
+        raw: lead,
+      });
+      continue;
+    }
 
     const spread = resale.estimatedPrice - lead.priceFound;
     const spreadPercent = (spread / lead.priceFound) * 100;
 
     // Apply sanity filters
-    if (spread < minProfitCents) continue;       // Not enough raw spread
-    if (spreadPercent < minSpreadPercent) continue; // Spread too thin (fees will eat it)
+    if (spread < minProfitCents) { lowSpread++; continue; }
+    if (spreadPercent < minSpreadPercent) { lowPercent++; continue; }
 
     // Estimate confidence — listing-URL data points are much stronger signal
     let confidence: 'high' | 'medium' | 'low' = 'low';
@@ -133,6 +159,7 @@ export function filterLeadsWithPriceData(
       sellPriceEstimate: resale.estimatedPrice,
       sellSource: resale.platform,
       sellUrl: resale.url || `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanTitleForSearch(lead.title))}&LH_Sold=1&LH_Complete=1`,
+      sellPriceType: resale.priceType,
       estimatedSpread: spread,
       spreadPercent,
       confidence,
@@ -141,8 +168,11 @@ export function filterLeadsWithPriceData(
     });
   }
 
-  // Sort by spread descending
-  return qualified.sort((a, b) => b.estimatedSpread - a.estimatedSpread);
+  console.log(`[filterLeads] ${leads.length} leads → ${qualified.length} qualified, ${unresearched.length} needs research | Rejected: ${noPrice} no price, ${noResale} no resale data, ${lowSpread} low spread (<$${(minProfitCents/100).toFixed(0)}), ${lowPercent} low percent (<${minSpreadPercent}%)`);
+
+  // Append up to 5 unresearched leads for Claude to investigate
+  const result = [...qualified.sort((a, b) => b.estimatedSpread - a.estimatedSpread), ...unresearched.slice(0, 5)];
+  return result;
 }
 
 /**
@@ -232,6 +262,7 @@ export function filterDealFeedItems(
           sellPriceEstimate: regularPrice,
           sellSource: 'Amazon/eBay',
           sellUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanedTitle)}&LH_Sold=1&LH_Complete=1`,
+          sellPriceType: 'estimated',
           estimatedSpread: regularPrice - dealPrice,
           spreadPercent: discount,
           confidence: discount > 70 ? 'high' : 'medium',
@@ -242,7 +273,7 @@ export function filterDealFeedItems(
       continue;
     }
 
-    // Fallback: exactly 2 prices in the TITLE ONLY — use lower as deal, higher as regular
+    // Fallback 1: exactly 2 prices in the TITLE ONLY — use lower as deal, higher as regular
     const titlePrices = extractAllPrices(item.title);
     if (titlePrices.length === 2) {
       const sorted = [...titlePrices].sort((a, b) => a - b);
@@ -263,17 +294,83 @@ export function filterDealFeedItems(
             sellPriceEstimate: regularPrice,
             sellSource: 'Amazon/eBay',
             sellUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanedTitle)}&LH_Sold=1&LH_Complete=1`,
+            sellPriceType: 'estimated',
             estimatedSpread: regularPrice - dealPrice,
             spreadPercent: discount,
             confidence: 'medium',
             category: item.source,
             raw: item,
           });
+          continue;
         }
       }
     }
-    // If no structured pattern AND not exactly 2 title prices → skip item entirely
-    // (better to miss a deal than fabricate a false spread)
+
+    // Fallback 2: one price in title + explicit percentage: "$50 (60% off)" or "60% off — $50"
+    const fullText = item.title + ' ' + item.description;
+    const pctMatch = fullText.match(/(\d+)%\s*off/i);
+    const singlePrice = extractAllPrices(item.title);
+    if (pctMatch && singlePrice.length === 1) {
+      const pctOff = parseInt(pctMatch[1], 10);
+      if (pctOff >= minDiscountPercent && pctOff < 95) {
+        const dealPrice = singlePrice[0];
+        // Back-calculate regular price: dealPrice = regularPrice * (1 - pctOff/100)
+        const regularPrice = Math.round(dealPrice / (1 - pctOff / 100));
+
+        if (regularPrice > dealPrice && dealPrice > 0) {
+          const cleanedTitle = cleanTitleForSearch(item.title);
+          qualified.push({
+            title: item.title,
+            description: item.description,
+            buyPrice: dealPrice,
+            buySource: item.source,
+            buyUrl: item.url,
+            sellPriceEstimate: regularPrice,
+            sellSource: 'Amazon/eBay',
+            sellUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanedTitle)}&LH_Sold=1&LH_Complete=1`,
+            sellPriceType: 'estimated',
+            estimatedSpread: regularPrice - dealPrice,
+            spreadPercent: pctOff,
+            confidence: 'low',
+            category: item.source,
+            raw: item,
+          });
+          continue;
+        }
+      }
+    }
+
+    // Fallback 3: two prices anywhere in title+description (title has 1, desc has more)
+    const allTextPrices = extractAllPrices(fullText);
+    if (allTextPrices.length >= 2 && singlePrice.length >= 1) {
+      const dealPrice = singlePrice[0];
+      const otherPrices = allTextPrices.filter(p => p !== dealPrice && p > dealPrice);
+      if (otherPrices.length > 0) {
+        const sorted = otherPrices.sort((a, b) => a - b);
+        const regularPrice = sorted[Math.floor(sorted.length / 2)];
+        const discount = ((regularPrice - dealPrice) / regularPrice) * 100;
+
+        if (discount >= minDiscountPercent && dealPrice > 0) {
+          const cleanedTitle = cleanTitleForSearch(item.title);
+          qualified.push({
+            title: item.title,
+            description: item.description,
+            buyPrice: dealPrice,
+            buySource: item.source,
+            buyUrl: item.url,
+            sellPriceEstimate: regularPrice,
+            sellSource: 'Amazon/eBay',
+            sellUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanedTitle)}&LH_Sold=1&LH_Complete=1`,
+            sellPriceType: 'estimated',
+            estimatedSpread: regularPrice - dealPrice,
+            spreadPercent: discount,
+            confidence: 'low',
+            category: item.source,
+            raw: item,
+          });
+        }
+      }
+    }
   }
 
   return qualified.sort((a, b) => b.estimatedSpread - a.estimatedSpread);
@@ -282,11 +379,12 @@ export function filterDealFeedItems(
 // ─── Resale Price Lookup (Tavily-powered, no Claude) ─────────────────
 
 export interface ResalePriceInfo {
-  estimatedPrice: number;  // cents
+  estimatedPrice: number;  // cents (0 if no listing-verified price found)
   platform: string;
   url: string;
   dataPoints: number;       // how many price data points we found
   listingDataPoints?: number; // how many came from actual listing URLs (higher quality)
+  priceType: SellPriceType;  // 'verified' if from real listings, 'estimated' otherwise
 }
 
 /**
@@ -322,6 +420,8 @@ export async function batchResaleLookup(
   // Only look up leads that have a price
   const leadsWithPrices = leads.filter(l => l.priceFound && l.priceFound > 0);
 
+  console.log(`[batchResaleLookup] Starting: ${leadsWithPrices.length} leads with prices`);
+
   // Sort by source quality before capping (listing URLs first, then Craigslist, etc.)
   const sortedLeads = [...leadsWithPrices].sort((a, b) => {
     const scoreSource = (l: ScoutLead) => {
@@ -336,7 +436,15 @@ export async function batchResaleLookup(
 
   // Look up resale prices for up to 25 leads (raised from 15)
   const cap = 25;
+  let consecutiveErrors = 0;
+
   for (let i = 0; i < sortedLeads.length && i < cap; i++) {
+    // If we've hit 3+ consecutive rate-limit errors, stop wasting credits
+    if (consecutiveErrors >= 3) {
+      console.log(`[batchResaleLookup] Stopping early: ${consecutiveErrors} consecutive Tavily errors (rate limited). Processed ${i}/${Math.min(sortedLeads.length, cap)} leads.`);
+      break;
+    }
+
     const lead = sortedLeads[i];
     const buyPriceCents = lead.priceFound!;
 
@@ -357,65 +465,86 @@ export async function batchResaleLookup(
         }),
       });
 
-      if (!response.ok) continue;
+      if (!response.ok) {
+        console.log(`[batchResaleLookup] Tavily returned ${response.status} for "${cleanTitle.slice(0, 40)}"`);
+        if (response.status === 429 || response.status === 433 || response.status >= 500) {
+          consecutiveErrors++;
+        }
+        continue;
+      }
+      consecutiveErrors = 0; // Reset on success
 
       const data = await response.json();
       const results = (data.results || []) as Array<{ url: string; title?: string; content?: string }>;
 
-      // Extract prices PER-RESULT with source-quality weighting
-      const weightedPrices: Array<{ value: number; weight: number }> = [];
+      console.log(`[batchResaleLookup] "${cleanTitle.slice(0, 40)}" → ${results.length} results, buy=$${(buyPriceCents / 100).toFixed(2)}`);
+
+      // ONLY extract prices from real listing URLs — skip blogs, reviews, aggregators
+      const listingPrices: number[] = [];
       let listingDataPoints = 0;
+      let bestListingUrl = '';
+      let bestListingPlatform = '';
 
-      // Process Tavily's answer field (medium weight)
-      if (data.answer) {
-        for (const price of extractAllPrices(data.answer)) {
-          // Anchor: skip prices wildly outside expected range
-          if (price < buyPriceCents * 0.2 || price > buyPriceCents * 10) continue;
-          weightedPrices.push({ value: price, weight: 2 });
-        }
-      }
-
-      // Process each search result individually
       for (const result of results) {
+        if (!isListingUrl(result.url)) continue; // Skip non-listing pages entirely
+
         const resultText = (result.title || '') + ' ' + (result.content || '');
         const resultPrices = extractAllPrices(resultText);
-        const isListing = isListingUrl(result.url);
-        const weight = isListing ? 3 : 1;
 
         for (const price of resultPrices) {
           // Anchor: skip prices wildly outside expected range
-          if (price < buyPriceCents * 0.2 || price > buyPriceCents * 10) continue;
-          weightedPrices.push({ value: price, weight });
-          if (isListing) listingDataPoints++;
+          if (price < buyPriceCents * 0.1 || price > buyPriceCents * 20) continue;
+          // Skip prices too close to buy price (not useful for spread)
+          if (Math.abs(price - buyPriceCents) < buyPriceCents * 0.05) continue;
+          listingPrices.push(price);
+          listingDataPoints++;
+        }
+
+        // Track the best listing URL
+        if (!bestListingUrl && resultPrices.length > 0) {
+          bestListingUrl = result.url;
+          bestListingPlatform = result.url.includes('ebay') ? 'eBay'
+            : result.url.includes('amazon') ? 'Amazon'
+            : result.url.includes('stockx') ? 'StockX'
+            : result.url.includes('mercari') ? 'Mercari'
+            : 'Marketplace';
         }
       }
 
-      if (weightedPrices.length > 0) {
-        const median = weightedMedian(weightedPrices);
+      console.log(`[batchResaleLookup]   ${listingPrices.length} prices from ${listingDataPoints} listing data points. ${listingPrices.length > 0 ? `Range: $${(Math.min(...listingPrices) / 100).toFixed(2)} – $${(Math.max(...listingPrices) / 100).toFixed(2)}` : 'NO LISTING PRICES'}`);
 
-        // Find the best URL — strongly prefer actual listing pages
-        const listingResult = results.find((r) => isListingUrl(r.url));
-        const marketplaceResult = results.find((r) =>
-          r.url.includes('ebay.com') || r.url.includes('amazon.com'),
-        );
-        const bestResult = listingResult || marketplaceResult || results[0];
+      // Determine price type: 'verified' needs 2+ listing data points
+      const priceType: SellPriceType = listingDataPoints >= 2 ? 'verified' : 'estimated';
 
-        const platform = bestResult?.url?.includes('ebay') ? 'eBay'
-          : bestResult?.url?.includes('amazon') ? 'Amazon'
-          : bestResult?.url?.includes('stockx') ? 'StockX'
-          : bestResult?.url?.includes('mercari') ? 'Mercari'
-          : 'Marketplace';
+      if (listingPrices.length > 0) {
+        // Use median of listing prices only
+        const sorted = [...listingPrices].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
 
         const info: ResalePriceInfo = {
           estimatedPrice: median,
-          platform,
-          url: bestResult?.url || '',
-          dataPoints: weightedPrices.length,
+          platform: bestListingPlatform || 'Marketplace',
+          url: bestListingUrl,
+          dataPoints: listingPrices.length,
           listingDataPoints,
+          priceType,
         };
 
         resaleMap.set(lead.url, info);
-        resaleMap.set(lead.title, info); // fallback matching by title
+        resaleMap.set(lead.title, info);
+      } else {
+        // No listing prices found — store as "no data" so we can pass to Claude
+        const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanTitle)}&LH_Sold=1&LH_Complete=1`;
+        const info: ResalePriceInfo = {
+          estimatedPrice: 0,
+          platform: 'eBay',
+          url: searchUrl,
+          dataPoints: 0,
+          listingDataPoints: 0,
+          priceType: 'research_needed',
+        };
+        resaleMap.set(lead.url, info);
+        resaleMap.set(lead.title, info);
       }
     } catch {
       // Skip failed lookups
@@ -526,6 +655,10 @@ export async function batchBookResaleLookup(
         : bestResult?.url?.includes('amazon') ? 'Amazon'
         : 'Marketplace';
 
+      // Determine if sell price is from a real listing
+      const hasListingUrl = listingResult !== undefined;
+      const bookSellPriceType: SellPriceType = hasListingUrl && prices.length >= 2 ? 'verified' : 'estimated';
+
       qualified.push({
         title: book.title,
         description: `${book.snippet} — Estimated resale: $${(sellEstimate / 100).toFixed(2)} on ${platform}. Buy at thrift stores/library sales for ~$2.`,
@@ -537,6 +670,7 @@ export async function batchBookResaleLookup(
         sellUrl: bestResult?.url || (book.isbn
           ? `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(book.isbn)}&LH_Sold=1&LH_Complete=1`
           : `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanTitleForSearch(book.title))}&LH_Sold=1&LH_Complete=1`),
+        sellPriceType: bookSellPriceType,
         estimatedSpread: spread,
         spreadPercent: (spread / estimatedBuyPrice) * 100,
         confidence: book.isbn && prices.length >= 3 ? 'high' : prices.length >= 2 ? 'medium' : 'low',
@@ -553,5 +687,88 @@ export async function batchBookResaleLookup(
     }
   }
 
+  return qualified.sort((a, b) => b.estimatedSpread - a.estimatedSpread);
+}
+
+// ─── Collectibles Direct Qualification ───────────────────────────────
+
+/**
+ * For collectible leads from Discogs/StockX that already have marketplace prices,
+ * estimate resale potential without needing Tavily.
+ *
+ * Discogs lowest_price = what you can buy it for on Discogs.
+ * eBay typically sells for 1.3-2x the Discogs lowest because eBay has a much larger audience.
+ * StockX market price = real-time, but you can sometimes find cheaper on eBay/Mercari.
+ */
+export function qualifyCollectiblesDirectly(
+  leads: ScoutLead[],
+  minProfitCents = 1000,
+): QualifiedLead[] {
+  const qualified: QualifiedLead[] = [];
+
+  for (const lead of leads) {
+    if (!lead.priceFound || lead.priceFound <= 0) continue;
+
+    const collectible = lead as CollectibleLead;
+    const buyPrice = lead.priceFound;
+
+    let sellEstimate: number;
+    let sellSource: string;
+    let sellUrl: string;
+    let confidence: 'high' | 'medium' | 'low';
+    let sellPriceType: SellPriceType = 'estimated';
+
+    if (lead.source === 'Discogs') {
+      sellEstimate = Math.round(buyPrice * 1.5);
+      sellSource = 'eBay';
+      sellUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanTitleForSearch(lead.title) + ' vinyl')}&LH_Sold=1&LH_Complete=1`;
+      confidence = 'medium';
+      sellPriceType = 'estimated';
+    } else if (lead.source === 'StockX') {
+      const marketPrice = collectible.marketAvg || buyPrice;
+      if (marketPrice > buyPrice * 1.2) {
+        sellEstimate = marketPrice;
+        sellSource = 'StockX/GOAT';
+        sellUrl = lead.url;
+        confidence = 'high';
+        sellPriceType = 'verified'; // StockX market price is real
+      } else {
+        continue;
+      }
+    } else {
+      sellEstimate = Math.round(buyPrice * 1.3);
+      sellSource = 'eBay';
+      sellUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cleanTitleForSearch(lead.title))}&LH_Sold=1&LH_Complete=1`;
+      confidence = 'low';
+    }
+
+    const feeRate = sellSource === 'StockX/GOAT' ? 0.095 : 0.1313;
+    const fees = Math.round(sellEstimate * feeRate);
+    const shipping = sellSource === 'StockX/GOAT' ? 0 : 800;
+    const netSpread = sellEstimate - buyPrice - fees - shipping;
+
+    if (netSpread < minProfitCents) continue;
+
+    const spreadPercent = (netSpread / buyPrice) * 100;
+
+    qualified.push({
+      title: lead.title,
+      description: `${lead.snippet} — Buy on ${lead.source} for $${(buyPrice/100).toFixed(2)}, estimated resale $${(sellEstimate/100).toFixed(2)} on ${sellSource} (after ~$${(fees/100).toFixed(2)} fees).`,
+      buyPrice,
+      buySource: lead.source,
+      buyUrl: lead.url,
+      sellPriceEstimate: sellEstimate,
+      sellSource,
+      sellUrl,
+      sellPriceType,
+      estimatedSpread: netSpread,
+      spreadPercent,
+      confidence,
+      category: lead.category,
+      raw: lead,
+    });
+  }
+
+  console.log(`[qualifyCollectibles] ${leads.length} leads → ${qualified.length} qualified directly (no Tavily needed)`);
   return qualified.sort((a, b) => b.estimatedSpread - a.estimatedSpread);
 }

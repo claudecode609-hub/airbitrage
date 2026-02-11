@@ -47,6 +47,7 @@ export const OpportunityCard = memo(function OpportunityCard({ opportunity, show
         sellPrice={opportunity.sellPrice}
         buySource={opportunity.buySource}
         sellSource={opportunity.sellSource}
+        sellPriceType={opportunity.sellPriceType}
       />
 
       <div className="flex items-center justify-between gap-3">
@@ -84,9 +85,19 @@ export const OpportunityCard = memo(function OpportunityCard({ opportunity, show
               href={opportunity.sellUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex-1 text-center text-[11px] font-medium py-1.5 px-2 rounded-[var(--radius-sm)] bg-[rgba(34,197,94,0.1)] text-[var(--color-profit)] hover:bg-[var(--color-profit)] hover:text-[var(--bg-primary)] transition-colors"
+              className={`flex-1 text-center text-[11px] font-medium py-1.5 px-2 rounded-[var(--radius-sm)] transition-colors ${
+                opportunity.sellPriceType === 'verified'
+                  ? 'bg-[rgba(34,197,94,0.1)] text-[var(--color-profit)] hover:bg-[var(--color-profit)] hover:text-[var(--bg-primary)]'
+                  : opportunity.sellPriceType === 'research_needed'
+                    ? 'bg-[rgba(100,100,120,0.1)] text-[var(--text-secondary)] hover:bg-[var(--text-tertiary)] hover:text-[var(--bg-primary)]'
+                    : 'bg-[rgba(245,158,11,0.1)] text-[var(--color-warning)] hover:bg-[var(--color-warning)] hover:text-[var(--bg-primary)]'
+              }`}
             >
-              Sell — {opportunity.sellSource}
+              {opportunity.sellPriceType === 'verified'
+                ? `Sell — ${opportunity.sellSource}`
+                : opportunity.sellPriceType === 'research_needed'
+                  ? `Find Price — ${opportunity.sellSource}`
+                  : `Research — ${opportunity.sellSource}`}
             </a>
           )}
         </div>

@@ -57,6 +57,8 @@ export interface AgentRunResult {
   abortReason?: string;
 }
 
+export type SellPriceType = 'verified' | 'estimated' | 'research_needed';
+
 export interface ParsedOpportunity {
   title: string;
   description: string;
@@ -66,6 +68,7 @@ export interface ParsedOpportunity {
   sellPrice: number;     // cents
   sellSource: string;
   sellUrl: string;
+  sellPriceType: SellPriceType; // how reliable the sell price is
   estimatedProfit: number; // cents
   fees: {
     platformFee?: number;
@@ -364,14 +367,20 @@ function parseOpportunities(response: ClaudeResponse | null): ParsedOpportunity[
     if (!Array.isArray(parsed)) return [];
 
     // Validate each opportunity has required fields
-    return parsed.filter(
-      (o: Record<string, unknown>) =>
-        o.title &&
-        typeof o.buyPrice === 'number' &&
-        typeof o.sellPrice === 'number' &&
-        o.buySource &&
-        o.sellSource,
-    ) as ParsedOpportunity[];
+    return parsed
+      .filter(
+        (o: Record<string, unknown>) =>
+          o.title &&
+          typeof o.buyPrice === 'number' &&
+          typeof o.sellPrice === 'number' &&
+          o.buySource &&
+          o.sellSource,
+      )
+      .map((o: Record<string, unknown>) => ({
+        ...o,
+        // Default sellPriceType if Claude didn't provide it
+        sellPriceType: o.sellPriceType || 'estimated',
+      })) as ParsedOpportunity[];
   } catch {
     return [];
   }

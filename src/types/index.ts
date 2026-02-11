@@ -61,6 +61,8 @@ export interface FeeBreakdown {
   total: number;
 }
 
+export type SellPriceType = 'verified' | 'estimated' | 'research_needed';
+
 export interface Opportunity {
   id: string;
   agentRunId: string;
@@ -74,6 +76,7 @@ export interface Opportunity {
   sellPrice: number; // cents
   sellSource: string;
   sellUrl: string;
+  sellPriceType: SellPriceType; // how reliable the sell price is
   estimatedProfit: number; // cents
   fees: FeeBreakdown;
   confidence: number; // 0-100

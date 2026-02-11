@@ -11,6 +11,7 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { formatCents, timeAgo } from '@/lib/utils';
 import { useAgentRun } from '@/hooks/useAgentRun';
 import { Agent, Opportunity, AgentRun, AGENT_TYPES, AgentType } from '@/types';
+import { ErrorBoundary } from '@/components/shared/error-boundary';
 
 interface AgentTabViewProps {
   agentType: AgentType;
@@ -21,7 +22,15 @@ interface AgentTabViewProps {
 
 type SubTab = 'feed' | 'controls' | 'history';
 
-export function AgentTabView({ agentType, agent, opportunities, runs }: AgentTabViewProps) {
+export function AgentTabView(props: AgentTabViewProps) {
+  return (
+    <ErrorBoundary>
+      <AgentTabViewInner {...props} />
+    </ErrorBoundary>
+  );
+}
+
+function AgentTabViewInner({ agentType, agent, opportunities, runs }: AgentTabViewProps) {
   const [activeTab, setActiveTab] = useState<SubTab>('feed');
   const info = AGENT_TYPES[agentType];
   const agentRun = useAgentRun(agentType);
@@ -40,6 +49,7 @@ export function AgentTabView({ agentType, agent, opportunities, runs }: AgentTab
     sellPrice: o.sellPrice,
     sellSource: o.sellSource,
     sellUrl: o.sellUrl,
+    sellPriceType: o.sellPriceType || 'estimated',
     estimatedProfit: o.estimatedProfit,
     fees: o.fees,
     confidence: o.confidence,

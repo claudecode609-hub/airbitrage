@@ -32,6 +32,7 @@ export default function DashboardHome() {
         sellPrice: o.sellPrice,
         sellSource: o.sellSource,
         sellUrl: o.sellUrl,
+        sellPriceType: o.sellPriceType || 'estimated',
         estimatedProfit: o.estimatedProfit,
         fees: o.fees,
         confidence: o.confidence,

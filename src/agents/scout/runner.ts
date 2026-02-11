@@ -28,6 +28,9 @@ import {
   CraigslistConfig,
   SourceDiagnostic,
   BookLead,
+  extractPrice,
+  extractAllPrices,
+  isListingUrl,
 } from './sources';
 import {
   findCryptoSpreads,
@@ -35,10 +38,11 @@ import {
   filterDealFeedItems,
   batchResaleLookup,
   batchBookResaleLookup,
+  qualifyCollectiblesDirectly,
   QualifiedLead,
   CryptoSpread,
 } from './filter';
-import { callClaude, ClaudeResponse } from '@/lib/claude';
+import { callClaude, ClaudeResponse, ClaudeMessage, ClaudeContentBlock } from '@/lib/claude';
 import { checkBudget, recordUsage, loadBudgetConfig, estimateCost } from '@/lib/budget';
 import { AgentType } from '@/types';
 import { ParsedOpportunity, AgentProgressEvent } from '../base-agent';
@@ -120,8 +124,8 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
           categories: categories.length > 0 ? categories : ['electronics', 'furniture', 'tools', 'musical'],
           queries: categories.length > 0 ? categories : [], // Empty = use HIGH_RESALE_BRANDS default
         },
-        minProfitCents: (userConfig.minProfitCents as number) || 2000,
-        minSpreadPercent: 25,
+        minProfitCents: (userConfig.minProfitCents as number) || 1000,
+        minSpreadPercent: 15,
         snipeSystemPrompt: SNIPE_PROMPTS.listings,
       };
 
@@ -157,8 +161,8 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
         useGovAuctions: true,
         useCollectiblesAPIs: false,
         useOpenLibrary: false,
-        minProfitCents: (userConfig.minProfitCents as number) || 2000,
-        minSpreadPercent: 20,
+        minProfitCents: (userConfig.minProfitCents as number) || 1000,
+        minSpreadPercent: 15,
         snipeSystemPrompt: SNIPE_PROMPTS.auctions,
       };
 
@@ -192,35 +196,31 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
       return {
         searchQueries: [
           ...categories.flatMap(cat => [
-            `${cat} clearance sale 70% off this week`,
-            `target clearance ${cat} markdown`,
-            `walmart clearance ${cat} deals`,
-            `${cat} open box deal clearance`,
+            `site:brickseek.com/walmart-clearance-checker ${cat}`,
+            `site:brickseek.com/target-clearance-checker ${cat}`,
+            `"clearance" "${cat}" "$" "was $" OR "reg $" OR "% off"`,
           ]),
           ...(categories.length === 0 ? [
-            // Target
-            `target clearance 70 off toys this week`,
-            `target clearance home goods markdown`,
-            `target clearance baby products deals`,
-            `target clearance kitchen appliances`,
-            // Walmart
-            `walmart clearance electronics deals today`,
-            `walmart hidden clearance markdown`,
-            `walmart clearance tools hardware`,
-            // Other retailers
-            `costco clearance markdowns`,
-            `best buy open box clearance deals`,
-            `home depot clearance power tools discount`,
-            `amazon warehouse deals open box`,
-            `kohls clearance 80 percent off`,
-            `nordstrom rack clearance designer`,
-            `lowes clearance tools hardware`,
-            // Specific high-value
-            `lego set clearance discount sale`,
-            `dyson vacuum clearance refurbished`,
-            `ninja blender clearance sale`,
-            `instant pot clearance deal`,
-            `airpods clearance discount sale`,
+            // Product-specific clearance with price signals
+            `site:brickseek.com/walmart-clearance-checker`,
+            `site:brickseek.com/target-clearance-checker`,
+            // Specific products on clearance — these are more likely to have real prices
+            `"dyson" "clearance" "$" site:target.com/p OR site:walmart.com/ip`,
+            `"ninja" OR "instant pot" "clearance" "$" site:target.com/p OR site:walmart.com/ip`,
+            `"lego" "clearance" "$" site:target.com/p OR site:walmart.com/ip`,
+            `"airpods" "open box" OR "clearance" "$" site:bestbuy.com`,
+            `"kitchenaid" "clearance" "$" site:target.com/p OR site:walmart.com/ip`,
+            `"nintendo switch" "clearance" OR "open box" "$" site:bestbuy.com`,
+            // Deal-specific pages with actual prices
+            `site:slickdeals.net "clearance" "$" "was $" this week`,
+            `site:dealnews.com clearance "70% off" OR "80% off" "$"`,
+            // Amazon warehouse / open box
+            `site:amazon.com/dp "renewed" OR "open box" "was $"`,
+            `amazon warehouse deals electronics open box price`,
+            // Specific high-margin products
+            `"roomba" "clearance" OR "refurbished" "$" site:amazon.com OR site:walmart.com`,
+            `"sonos" "open box" OR "refurbished" "$" site:bestbuy.com`,
+            `"vitamix" "clearance" OR "refurbished" "$"`,
           ] : []),
         ],
         useEbaySearch: false,
@@ -230,8 +230,8 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
         useGovAuctions: false,
         useCollectiblesAPIs: false,
         useOpenLibrary: false,
-        minProfitCents: (userConfig.minProfitCents as number) || 1500,
-        minSpreadPercent: 35,
+        minProfitCents: (userConfig.minProfitCents as number) || 1000,
+        minSpreadPercent: 20,
         snipeSystemPrompt: SNIPE_PROMPTS.retail,
       };
 
@@ -275,8 +275,8 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
         useGovAuctions: false,
         useCollectiblesAPIs: false,
         useOpenLibrary: false,
-        minProfitCents: (userConfig.minProfitCents as number) || 2000,
-        minSpreadPercent: 20,
+        minProfitCents: (userConfig.minProfitCents as number) || 1500,
+        minSpreadPercent: 15,
         snipeSystemPrompt: SNIPE_PROMPTS.tickets,
       };
 
@@ -314,8 +314,8 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
         useGovAuctions: false,
         useCollectiblesAPIs: true,
         useOpenLibrary: false,
-        minProfitCents: (userConfig.minProfitCents as number) || 1500,
-        minSpreadPercent: 20,
+        minProfitCents: (userConfig.minProfitCents as number) || 1000,
+        minSpreadPercent: 15,
         snipeSystemPrompt: SNIPE_PROMPTS.collectibles,
       };
 
@@ -360,8 +360,8 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
         useGovAuctions: false,
         useCollectiblesAPIs: false,
         useOpenLibrary: true,
-        minProfitCents: (userConfig.minProfitCents as number) || 800,
-        minSpreadPercent: 35,
+        minProfitCents: (userConfig.minProfitCents as number) || 500,
+        minSpreadPercent: 20,
         snipeSystemPrompt: SNIPE_PROMPTS.books,
       };
 
@@ -387,35 +387,43 @@ function getScoutConfig(agentType: AgentType, userConfig: Record<string, unknown
 const SNIPE_PROMPTS: Record<string, string> = {
   listings: `You are the Listings Agent for Airbitrage. You are being given PRE-SCREENED leads — items found on Craigslist and local marketplaces where our automated system has already detected a potential price spread.
 
-The buy-side data comes primarily from Craigslist RSS feeds with real listing URLs and prices. The sell-side estimates come from automated resale price lookups.
-
 Your job: Verify each lead and produce structured opportunity data.
 
-CRITICAL RULES:
-- The buy item and sell item MUST be the EXACT SAME product (same brand, model, size, condition class). If the lead compares different items or the items aren't clearly identical, REJECT that lead entirely.
-- Use ONLY the actual URLs from the lead data. Never invent or guess URLs. Craigslist URLs are real listing pages — these are high quality.
+SELL PRICE VERIFICATION:
+- Leads marked "VERIFIED" have sell prices confirmed from real marketplace listings. Trust these.
+- Leads marked "ESTIMATED" have rough sell prices. Use the search_sold_prices tool to verify before including.
+- Leads marked "UNKNOWN" have no sell price. Use the search_sold_prices tool to find the real sell price.
+- Only present sell prices you are confident in. Set sellPriceType accordingly.
+
+RULES:
+- The buy and sell items should be the same product (brand, model). If you can reasonably identify the product from the title, include it.
+- Use the actual URLs from the lead data. For sell URLs, use the best listing URL from your search results.
 - Calculate fees using standard platform rates (eBay: 13.13% + $0.30, Amazon: 15%)
 - Add shipping estimates (small: $5, medium: $12, large: $25)
-- Assign a confidence score (0-100) based on data quality. Craigslist listings with direct URLs get +10 confidence. Deduct 20 points if the sell URL is a search page.
-- Be skeptical — if the price spread seems too good to be true, lower confidence and add risk notes.
-- Note condition risks for used items (Craigslist items are typically used).
+- Assign a confidence score (0-100). Craigslist/Marketplace listings with direct URLs get +10. Search/category page URLs get -20.
+- Note condition risks for used items.
 
-Only output opportunities where net profit > $20 after all fees.`,
+Output opportunities where net profit > $10 after all fees. Be generous — surface marginal opportunities and let the user decide.`,
 
   auctions: `You are the Auction Agent for Airbitrage. You are being given PRE-SCREENED auction leads where our system detected potential value.
 
 Your job: Verify each lead and produce structured opportunity data.
 
-CRITICAL RULES:
-- The buy item and resale comparison MUST be the EXACT SAME product. If the lead compares a generic category search to a specific product price, REJECT it.
-- Use ONLY the actual URLs from the lead data. Never invent URLs.
-- Check if the current bid/price is genuinely below market value for this SPECIFIC item
-- Factor in eBay buyer premium, shipping, and resale fees
-- Consider auction timing (ending soon = less competition = more realistic price)
-- Assign confidence conservatively — deduct 20 points if URLs are search pages not specific listings
-- Note sniping risks (last-minute bidding wars)
+SELL PRICE VERIFICATION:
+- Leads marked "VERIFIED" have sell prices confirmed from real marketplace listings. Trust these.
+- Leads marked "ESTIMATED" have rough sell prices. Use the search_sold_prices tool to verify before including.
+- Leads marked "UNKNOWN" have no sell price. Use the search_sold_prices tool to find the real sell price.
+- Only present sell prices you are confident in. Set sellPriceType accordingly.
 
-Only output opportunities where net profit > $20 after all fees.`,
+RULES:
+- The buy and sell items should be the same product. If you can identify the product from the title, include it.
+- Use the actual URLs from the lead data. For sell URLs, use the best listing URL from your search results.
+- Check if the current bid/price is below market value for this item
+- Factor in buyer premium, shipping, and resale fees (eBay: 13.13%)
+- Assign confidence based on data quality. Deduct 20 points for search-page URLs.
+- Note sniping risks and bid competition.
+
+Output opportunities where net profit > $10 after all fees. Be generous — let the user decide.`,
 
   crypto: `You are the Crypto Agent for Airbitrage. You are being given REAL-TIME price data from exchange APIs showing cross-exchange spreads.
 
@@ -432,20 +440,32 @@ Note: All prices provided are LIVE from exchange APIs. Convert USD amounts to ce
 
 Your job: Verify each deal and produce structured opportunity data.
 
-CRITICAL RULES:
-- The buy item and sell comparison MUST be the EXACT SAME product (same SKU, brand, model). Do NOT compare a deal on one item to the resale price of a different item.
-- Use ONLY the actual URLs from the lead data. Never invent or guess URLs.
-- Confirm the clearance/deal price is real (not a misleading discount)
-- Compare against likely resale price on Amazon/eBay for this SPECIFIC product
+SELL PRICE VERIFICATION:
+- Leads marked "VERIFIED" have sell prices confirmed from real eBay sold listings. Trust these.
+- Leads marked "ESTIMATED" have rough sell prices (often just the regular retail price). Use the search_sold_prices tool to find ACTUAL resale prices on eBay.
+- Leads marked "UNKNOWN" have no sell price. Use the search_sold_prices tool to find the real sell price.
+- Only present sell prices you are confident in. Set sellPriceType accordingly.
+- The sell price should be what the item ACTUALLY SELLS FOR on eBay/Amazon, NOT the regular retail price.
+
+RULES:
+- When the lead clearly identifies a specific product (brand + model), you should output it as an opportunity even if the URL is a category/search page. Use the title and description to identify the product.
+- Use the actual URLs from the lead data. For sell URLs, use the best listing URL from your search results.
+- If the lead is too generic (e.g. "Walmart clearance" with no specific product), skip it.
+- Confirm the clearance/deal price is plausible (not obviously wrong)
 - Factor in Amazon FBA fees (15% referral + ~$3-5 fulfillment) or eBay fees (13.13%)
 - Consider whether the item has resale demand (brand name items are better)
-- Flag if the item might be gated on Amazon. Deduct 20 points if URLs are search pages.
+- If the item is gated on Amazon, note it in riskNotes.
 
-Only output opportunities where net profit > $15 after all fees.`,
+Output opportunities where net profit > $10 after all fees. Be generous — it's better to surface a marginal opportunity than to miss a good one. The user can decide.`,
 
   tickets: `You are the Tickets Agent for Airbitrage. You are being given leads about events where ticket price spreads may exist between primary and secondary markets.
 
 Your job: Verify each lead and produce structured opportunity data.
+
+SELL PRICE VERIFICATION:
+- Leads marked "VERIFIED" have sell prices confirmed. Trust these.
+- Leads marked "ESTIMATED" or "UNKNOWN" need verification. Use the search_sold_prices tool if available.
+- Only present sell prices you are confident in. Set sellPriceType accordingly.
 
 CRITICAL RULES:
 - The buy and sell MUST be for the EXACT SAME event, venue, date, and comparable section. Do NOT compare tickets for different events or sections.
@@ -462,31 +482,41 @@ Only output opportunities where net profit > $30 after all fees.`,
 
 Your job: Verify each lead and produce structured opportunity data.
 
-CRITICAL RULES:
-- The buy item and sell comparison MUST be the EXACT SAME product (same colorway, edition, grade, size). Do NOT compare different variants or editions.
-- Use ONLY the actual URLs from the lead data. Never invent URLs.
-- Verify the specific item and its market value
-- Factor in platform fees (StockX: 9.5%, GOAT: 9.5%+$5, eBay: 13.13%)
-- Consider authentication costs and shipping. Deduct 20 points if URLs are search pages.
-- Assess condition/grading impact on price
-- Note authenticity risks
+SELL PRICE VERIFICATION:
+- Leads marked "VERIFIED" have sell prices confirmed from real marketplace data (StockX, eBay sold). Trust these.
+- Leads marked "ESTIMATED" have rough sell prices (e.g. Discogs-to-eBay estimate). Use the search_sold_prices tool to verify.
+- Leads marked "UNKNOWN" have no sell price. Use the search_sold_prices tool to find the real sell price.
+- Only present sell prices you are confident in. Set sellPriceType accordingly.
 
-Only output opportunities where net profit > $20 after all fees.`,
+RULES:
+- The buy and sell should be the same product. If you can identify the specific item (name, colorway, set number), include it.
+- Use the actual URLs from the lead data.
+- Factor in platform fees (StockX: 9.5%, GOAT: 9.5%+$5, eBay: 13.13%)
+- Consider authentication costs and shipping.
+- Deduct 20 confidence points for search-page URLs.
+- Note authenticity risks and condition concerns.
+
+Output opportunities where net profit > $10 after all fees. Be generous — surface marginal opportunities and let the user decide.`,
 
   books: `You are the Books/Media Agent for Airbitrage. You are being given PRE-SCREENED leads for books and media where our system detected pricing below Amazon/eBay resale values.
 
 Your job: Verify each lead and produce structured opportunity data.
 
-CRITICAL RULES:
-- The buy and sell MUST be the EXACT SAME book (same ISBN, edition, format). Do NOT compare a paperback price to a hardcover price, or different editions.
-- Use ONLY the actual URLs from the lead data. Never invent URLs.
-- Confirm the book/media item and its resale value for this SPECIFIC edition
-- Factor in Amazon FBA fees (15% referral + $3.22 fulfillment for standard books)
-- Consider book condition requirements. Deduct 20 points if URLs are search pages.
-- Check if sales rank suggests the book will actually sell
-- Include ISBN when possible
+SELL PRICE VERIFICATION:
+- Leads marked "VERIFIED" have sell prices confirmed from real marketplace listings. Trust these.
+- Leads marked "ESTIMATED" have rough sell prices. Use the search_sold_prices tool to verify before including.
+- Leads marked "UNKNOWN" have no sell price. Use the search_sold_prices tool to find the real sell price.
+- Only present sell prices you are confident in. Set sellPriceType accordingly.
 
-Only output opportunities where net profit > $10 after all fees.`,
+RULES:
+- The buy and sell should be the same book (same title, edition if identifiable).
+- Use the actual URLs from the lead data.
+- Factor in Amazon FBA fees (15% referral + $3.22 fulfillment for standard books)
+- Books are typically bought at thrift stores/library sales for $1-$3 and resold for $10-$80+
+- Include ISBN in the description when available.
+- Deduct 20 confidence points for search-page URLs.
+
+Output opportunities where net profit > $5 after all fees. Books have very low buy costs, so even modest sell prices can be profitable.`,
 };
 
 // ─── The Main Runner ─────────────────────────────────────────────────
@@ -676,7 +706,7 @@ export async function runScoutThenSnipe(
       allDiagnostics.push(...feedResult.diagnostics);
       sourcesChecked.push('Slickdeals', 'DealNews', 'r/deals', 'r/flipping', 'r/buildapcsales');
 
-      dealLeads = filterDealFeedItems(feedResult.leads, 35); // Lowered from 50% to 35%
+      dealLeads = filterDealFeedItems(feedResult.leads, 25); // Lowered from 35% to 25%
 
       onProgress?.({
         type: 'tool_result',
@@ -730,10 +760,28 @@ export async function runScoutThenSnipe(
     // Combine all leads from all sources (excluding books — they get their own pipeline)
     const allLeads = [...craigslistLeads, ...govLeads, ...collectiblesLeads, ...scoutLeads, ...ebayLeads];
     const leadsWithPrices = allLeads.filter(l => l.priceFound && l.priceFound > 0);
+    const leadsWithoutPrices = allLeads.filter(l => !l.priceFound || l.priceFound <= 0);
+
+    // Diagnostic: log what we got from each source
+    console.log(`[Scout ${config.agentType}] Source breakdown:`);
+    console.log(`  Craigslist: ${craigslistLeads.length} leads`);
+    console.log(`  Gov auctions: ${govLeads.length} leads`);
+    console.log(`  Collectibles: ${collectiblesLeads.length} leads`);
+    console.log(`  Tavily search: ${scoutLeads.length} leads`);
+    console.log(`  eBay: ${ebayLeads.length} leads`);
+    console.log(`  Deal feeds: ${dealLeads.length} pre-qualified`);
+    console.log(`  Books: ${bookLeads.length} leads`);
+    console.log(`  TOTAL: ${allLeads.length} leads, ${leadsWithPrices.length} with prices, ${leadsWithoutPrices.length} without`);
+    if (leadsWithoutPrices.length > 0) {
+      console.log(`  Leads without prices (first 5):`);
+      for (const l of leadsWithoutPrices.slice(0, 5)) {
+        console.log(`    - "${l.title.slice(0, 60)}" from ${l.source} (${l.url.slice(0, 80)})`);
+      }
+    }
 
     onProgress?.({
       type: 'tool_call',
-      message: `${leadsWithPrices.length} leads have prices. Running resale price lookups…`,
+      message: `${leadsWithPrices.length} leads have prices (${leadsWithoutPrices.length} without). Running resale price lookups…`,
     });
 
     // 1i. Resale price lookup (Tavily, but no Claude)
@@ -755,6 +803,68 @@ export async function runScoutThenSnipe(
       });
     }
 
+    // 1i-b. For high-quality listing URLs WITHOUT prices, try a direct Tavily lookup
+    // These are real marketplace listings where the snippet just didn't include the price
+    if (leadsWithoutPrices.length > 0 && qualifiedLeads.length < 10) {
+      const listingUrlLeads = leadsWithoutPrices.filter(l => isListingUrl(l.url)).slice(0, 8);
+
+      if (listingUrlLeads.length > 0) {
+        onProgress?.({
+          type: 'tool_call',
+          message: `${listingUrlLeads.length} listing URLs have no price — trying direct lookups…`,
+        });
+
+        for (const lead of listingUrlLeads) {
+          try {
+            // Fetch the listing page content to find the price
+            const resp = await fetch('https://api.tavily.com/search', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: AbortSignal.timeout(8000),
+              body: JSON.stringify({
+                api_key: config.tavilyApiKey,
+                query: `${lead.title} price`,
+                max_results: 3,
+                include_answer: true,
+              }),
+            });
+            if (!resp.ok) continue;
+            const data = await resp.json();
+
+            // Try to get a price from the answer
+            const answerPrice = data.answer ? extractPrice(data.answer) : null;
+            if (answerPrice && answerPrice > 0) {
+              lead.priceFound = answerPrice;
+              // Now it has a price, add it to the resale pipeline
+              leadsWithPrices.push(lead);
+            }
+          } catch { /* skip */ }
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+
+        // Re-run resale lookup for newly-priced leads
+        if (leadsWithPrices.length > 0) {
+          const newResaleData = await batchResaleLookup(
+            leadsWithPrices.filter(l => l.priceFound && l.priceFound > 0),
+            config.tavilyApiKey,
+          );
+          const newQualified = filterLeadsWithPriceData(
+            allLeads.filter(l => l.priceFound && l.priceFound > 0),
+            newResaleData,
+            agentConfig.minProfitCents,
+            agentConfig.minSpreadPercent,
+          );
+          // Merge new qualified leads (avoid duplicates)
+          const existingUrls = new Set(qualifiedLeads.map(q => q.buyUrl));
+          for (const q of newQualified) {
+            if (!existingUrls.has(q.buyUrl)) {
+              qualifiedLeads.push(q);
+            }
+          }
+        }
+      }
+    }
+
     // 1j. Book-specific resale lookup (books have no priceFound — need ISBN-based lookups)
     let bookQualifiedLeads: QualifiedLead[] = [];
     if (bookLeads.length > 0) {
@@ -773,10 +883,44 @@ export async function runScoutThenSnipe(
       });
     }
 
+    // 1k. Collectibles direct qualification (no Tavily needed — uses Discogs/StockX data)
+    let collectiblesDirectLeads: QualifiedLead[] = [];
+    if (agentConfig.useCollectiblesAPIs && collectiblesLeads.length > 0) {
+      // If Tavily-based resale lookup didn't produce results for collectibles,
+      // fall back to direct qualification using marketplace data
+      const collectiblesInQualified = qualifiedLeads.filter(q =>
+        q.buySource === 'Discogs' || q.buySource === 'StockX'
+      );
+      if (collectiblesInQualified.length === 0) {
+        onProgress?.({ type: 'tool_call', message: 'Using Discogs/StockX marketplace data for direct qualification…' });
+        collectiblesDirectLeads = qualifyCollectiblesDirectly(
+          collectiblesLeads,
+          agentConfig.minProfitCents,
+        );
+        onProgress?.({
+          type: 'tool_result',
+          message: `Direct collectibles qualification: ${collectiblesDirectLeads.length} opportunities from marketplace data.`,
+        });
+      }
+    }
+
     // Merge all qualified leads
-    const allQualified = [...qualifiedLeads, ...dealLeads, ...bookQualifiedLeads].slice(0, 25);
+    const allQualified = [...qualifiedLeads, ...dealLeads, ...bookQualifiedLeads, ...collectiblesDirectLeads].slice(0, 25);
 
     const totalLeads = allLeads.length + (dealLeads.length > 0 ? dealLeads.length : 0) + bookLeads.length;
+
+    console.log(`[Scout ${config.agentType}] Pipeline summary:`);
+    console.log(`  Total leads: ${totalLeads}`);
+    console.log(`  Qualified from resale: ${qualifiedLeads.length}`);
+    console.log(`  Qualified from deals: ${dealLeads.length}`);
+    console.log(`  Qualified from books: ${bookQualifiedLeads.length}`);
+    console.log(`  Qualified from collectibles direct: ${collectiblesDirectLeads.length}`);
+    console.log(`  FINAL: ${allQualified.length} → sending to Claude`);
+    if (allQualified.length > 0) {
+      for (const q of allQualified.slice(0, 5)) {
+        console.log(`    ✓ "${q.title.slice(0, 50)}" buy=$${(q.buyPrice/100).toFixed(2)} sell=$${(q.sellPriceEstimate/100).toFixed(2)} spread=${q.spreadPercent.toFixed(0)}%`);
+      }
+    }
 
     if (allQualified.length === 0) {
       // Build a diagnostic summary for the "no results" case
@@ -833,15 +977,21 @@ export async function runScoutThenSnipe(
       };
     }
 
-    // Build the leads summary for Claude (compact to save tokens)
+    // Build the leads summary for Claude with sell-price quality labels
     const leadsSummary = allQualified.map((lead, i) => {
+      const priceLabel = lead.sellPriceType === 'verified'
+        ? `VERIFIED $${(lead.sellPriceEstimate / 100).toFixed(2)} from listing`
+        : lead.sellPriceType === 'research_needed' || lead.sellPriceEstimate === 0
+          ? 'UNKNOWN — use search_sold_prices tool to find sell price'
+          : `ESTIMATED ~$${(lead.sellPriceEstimate / 100).toFixed(2)} (verify with search_sold_prices tool)`;
+
       return `[Lead ${i + 1}]
 Title: ${lead.title.slice(0, 100)}
 Buy: $${(lead.buyPrice / 100).toFixed(2)} on ${lead.buySource}
 Buy URL: ${lead.buyUrl}
-Est. Sell: $${(lead.sellPriceEstimate / 100).toFixed(2)} on ${lead.sellSource}
+Sell Price: ${priceLabel}
+Sell Source: ${lead.sellSource}
 Sell URL: ${lead.sellUrl}
-Spread: $${(lead.estimatedSpread / 100).toFixed(2)} (${lead.spreadPercent.toFixed(0)}%)
 Confidence: ${lead.confidence}
 Snippet: ${lead.description.slice(0, 150)}`;
     }).join('\n\n');
@@ -859,6 +1009,7 @@ Return verified opportunities as a JSON array wrapped in <opportunities> tags:
     "sellPrice": 18900,
     "sellSource": "eBay",
     "sellUrl": "https://...",
+    "sellPriceType": "verified",
     "estimatedProfit": 10743,
     "fees": {
       "platformFee": 2457,
@@ -874,34 +1025,113 @@ Return verified opportunities as a JSON array wrapped in <opportunities> tags:
 
 IMPORTANT:
 - All prices in CENTS.
-- If the buy and sell items are NOT clearly identical products, do NOT include that lead.
-- If a URL is a search/category page rather than a specific item listing, add "Buy/Sell URL is a search page, not a direct listing" to riskNotes and reduce confidence by 20.
-- If none of the leads verify as real opportunities with identical items, return an empty array. An empty array is a GOOD result — it means you're being properly selective.`;
+- sellPriceType must be one of: "verified" (you found real sold/listed prices), "estimated" (price is a rough estimate), "research_needed" (you couldn't verify the price).
+- For leads marked UNKNOWN or ESTIMATED, use the search_sold_prices tool to look up real sold prices BEFORE including them.
+- Only present sell prices you are confident in. If you can't verify a sell price, set sellPriceType to "research_needed".
+- If you can identify a specific product from the lead title/description, include it even if the URL is a search page. Add "URL is a search page, not a direct listing" to riskNotes and reduce confidence by 20.
+- If the lead is too vague to identify ANY specific product (e.g. just "Walmart clearance"), skip it.
+- PREFER to include opportunities rather than exclude them. Let the user make the final call.
+- You MUST output at least one opportunity if ANY of the leads have identifiable products with profitable spreads. An empty array means NONE of the leads had identifiable products.`;
+
+    // Count how many leads need research (determines if we need tool-use loop)
+    const needsResearch = allQualified.filter(l =>
+      l.sellPriceType === 'research_needed' || l.sellPriceType === 'estimated'
+    ).length;
 
     const snipeMessage = `Here are ${allQualified.length} pre-screened leads where our automated system detected potential price spreads. Verify each one and output structured opportunities for any that are genuinely profitable after fees.
 
-${leadsSummary}
+${needsResearch > 0 ? `NOTE: ${needsResearch} leads have unverified sell prices. Use the search_sold_prices tool to look up real eBay sold prices for these items before finalizing your analysis. You have up to 5 tool calls.\n\n` : ''}${leadsSummary}
 
 ${OPPORTUNITY_OUTPUT_SCHEMA}`;
 
-    // Single Claude call with all qualified leads
-    const response = await callClaude(
-      {
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 4096,
-        system: agentConfig.snipeSystemPrompt,
-        messages: [{ role: 'user', content: snipeMessage }],
+    // Build tool definitions for Claude
+    const snipeTools = needsResearch > 0 ? [{
+      name: 'search_sold_prices',
+      description: 'Search eBay sold listings to find real sold prices for a product. Returns listing URLs and prices. Use this to verify or find sell prices for leads marked ESTIMATED or UNKNOWN.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          product_name: {
+            type: 'string' as const,
+            description: 'The product name to search for (e.g. "Dyson V8 Absolute vacuum")',
+          },
+        },
+        required: ['product_name'],
       },
-      config.apiKey,
-    );
+    }] : undefined;
 
-    totalInputTokens = response.usage.input_tokens;
-    totalOutputTokens = response.usage.output_tokens;
+    // Tool-use loop (max 5 tool calls to conserve Tavily budget)
+    let toolCallsUsed = 0;
+    const maxToolCalls = 5;
+    const messages: ClaudeMessage[] = [
+      { role: 'user', content: snipeMessage },
+    ];
 
-    await recordUsage(config.agentType, totalInputTokens, totalOutputTokens, 0);
+    let finalResponse: ClaudeResponse | null = null;
 
-    // Parse opportunities from Claude's response
-    const opportunities = parseOpportunities(response);
+    for (let loop = 0; loop < maxToolCalls + 1; loop++) {
+      const response = await callClaude(
+        {
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 4096,
+          system: agentConfig.snipeSystemPrompt,
+          messages,
+          ...(snipeTools && toolCallsUsed < maxToolCalls ? { tools: snipeTools } : {}),
+        },
+        config.apiKey,
+      );
+
+      totalInputTokens += response.usage.input_tokens;
+      totalOutputTokens += response.usage.output_tokens;
+      await recordUsage(config.agentType, response.usage.input_tokens, response.usage.output_tokens, 0);
+
+      // Check if Claude wants to use a tool
+      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+      if (toolUseBlocks.length === 0 || toolCallsUsed >= maxToolCalls) {
+        // Claude is done — parse final response
+        finalResponse = response;
+        break;
+      }
+
+      // Add assistant message
+      messages.push({ role: 'assistant', content: response.content });
+
+      // Execute tool calls
+      const toolResults: ClaudeContentBlock[] = [];
+      for (const block of toolUseBlocks) {
+        toolCallsUsed++;
+        const input = (block as ClaudeContentBlock).input as unknown as { product_name: string };
+        const productName = input?.product_name || '';
+
+        onProgress?.({
+          type: 'tool_call',
+          message: `Claude searching eBay sold prices for "${productName.slice(0, 50)}"…`,
+        });
+
+        let resultText: string;
+        try {
+          resultText = await searchSoldPrices(productName, config.tavilyApiKey);
+        } catch {
+          resultText = 'Error: search failed';
+        }
+
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: (block as ClaudeContentBlock).id,
+          content: resultText,
+        });
+
+        onProgress?.({
+          type: 'tool_result',
+          message: `Sold price search complete for "${productName.slice(0, 50)}"`,
+        });
+      }
+
+      messages.push({ role: 'user', content: toolResults });
+    }
+
+    // Parse opportunities from Claude's final response
+    const opportunities = finalResponse ? parseOpportunities(finalResponse) : [];
     const cost = estimateCost(totalInputTokens, totalOutputTokens);
 
     clearTimeout(runTimeout);
@@ -915,10 +1145,10 @@ ${OPPORTUNITY_OUTPUT_SCHEMA}`;
     return {
       success: true,
       opportunities,
-      reasoning: extractReasoning(response),
+      reasoning: finalResponse ? extractReasoning(finalResponse) : '',
       totalInputTokens,
       totalOutputTokens,
-      totalToolCalls: 1, // Just one Claude call!
+      totalToolCalls: 1 + toolCallsUsed,
       estimatedCost: cost,
       scoutStats: {
         leadsFound: totalLeads,
@@ -971,6 +1201,7 @@ function buildCryptoOpportunities(spreads: CryptoSpread[]): ParsedOpportunity[] 
       sellPrice: sellPriceCents,
       sellSource: spread.sellExchange,
       sellUrl: spread.sellUrl,
+      sellPriceType: 'verified' as const, // Live exchange API prices
       estimatedProfit: Math.max(0, profit),
       fees: {
         platformFee: buyFee + sellFee,
@@ -1001,14 +1232,20 @@ function parseOpportunities(response: ClaudeResponse): ParsedOpportunity[] {
     const parsed = JSON.parse(match[1]);
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.filter(
-      (o: Record<string, unknown>) =>
-        o.title &&
-        typeof o.buyPrice === 'number' &&
-        typeof o.sellPrice === 'number' &&
-        o.buySource &&
-        o.sellSource,
-    ) as ParsedOpportunity[];
+    return parsed
+      .filter(
+        (o: Record<string, unknown>) =>
+          o.title &&
+          typeof o.buyPrice === 'number' &&
+          typeof o.sellPrice === 'number' &&
+          o.buySource &&
+          o.sellSource,
+      )
+      .map((o: Record<string, unknown>) => ({
+        ...o,
+        // Default sellPriceType if Claude didn't provide it
+        sellPriceType: o.sellPriceType || 'estimated',
+      })) as ParsedOpportunity[];
   } catch {
     return [];
   }
@@ -1019,4 +1256,72 @@ function extractReasoning(response: ClaudeResponse): string {
     .filter(b => b.type === 'text')
     .map(b => b.text ?? '')
     .join('\n');
+}
+
+/**
+ * Search eBay sold listings for a product to find real sold prices.
+ * Used by Claude as a tool during the snipe phase.
+ */
+async function searchSoldPrices(productName: string, tavilyApiKey: string): Promise<string> {
+  if (!productName || productName.length < 3) {
+    return 'Error: product_name must be at least 3 characters';
+  }
+
+  try {
+    const response = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({
+        api_key: tavilyApiKey,
+        query: `site:ebay.com "${productName}" sold`,
+        max_results: 5,
+        include_answer: false,
+      }),
+    });
+
+    if (!response.ok) {
+      return `Error: Tavily returned ${response.status}`;
+    }
+
+    const data = await response.json();
+    const results = (data.results || []) as Array<{ url: string; title?: string; content?: string }>;
+
+    // Only extract from real listing URLs
+    const listings: Array<{ url: string; title: string; prices: number[] }> = [];
+    for (const result of results) {
+      if (!isListingUrl(result.url)) continue;
+
+      const text = (result.title || '') + ' ' + (result.content || '');
+      const prices = extractAllPrices(text).filter(p => p >= 100 && p <= 500000); // $1 - $5000 range
+
+      if (prices.length > 0) {
+        listings.push({
+          url: result.url,
+          title: (result.title || '').slice(0, 100),
+          prices,
+        });
+      }
+    }
+
+    if (listings.length === 0) {
+      return `No eBay sold listings found for "${productName}". The sell price cannot be verified. Set sellPriceType to "research_needed".`;
+    }
+
+    // Format results for Claude
+    const allPrices = listings.flatMap(l => l.prices);
+    const sorted = [...allPrices].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+
+    let output = `Found ${listings.length} eBay sold listings for "${productName}":\n`;
+    for (const listing of listings) {
+      output += `- ${listing.title}\n  URL: ${listing.url}\n  Prices: ${listing.prices.map(p => `$${(p/100).toFixed(2)}`).join(', ')}\n`;
+    }
+    output += `\nMedian sold price: $${(median/100).toFixed(2)} (${allPrices.length} data points)`;
+    output += `\nUse this as the sellPrice (in cents: ${median}). Set sellPriceType to "verified" if 2+ data points, or "estimated" if only 1.`;
+
+    return output;
+  } catch {
+    return `Error: search failed for "${productName}"`;
+  }
 }
