@@ -77,8 +77,12 @@ async function readUsage(): Promise<TokenUsageEntry> {
 }
 
 async function writeUsage(usage: TokenUsageEntry): Promise<void> {
-  await ensureDataDir();
-  await writeFile(BUDGET_FILE, JSON.stringify(usage, null, 2));
+  try {
+    await ensureDataDir();
+    await writeFile(BUDGET_FILE, JSON.stringify(usage, null, 2));
+  } catch {
+    // Filesystem may be read-only (e.g. Vercel serverless) — silently skip
+  }
 }
 
 /**
@@ -166,7 +170,11 @@ export async function loadBudgetConfig(): Promise<BudgetConfig> {
  * Save budget config.
  */
 export async function saveBudgetConfig(config: BudgetConfig): Promise<void> {
-  await ensureDataDir();
-  const configFile = path.join(DATA_DIR, 'budget-config.json');
-  await writeFile(configFile, JSON.stringify(config, null, 2));
+  try {
+    await ensureDataDir();
+    const configFile = path.join(DATA_DIR, 'budget-config.json');
+    await writeFile(configFile, JSON.stringify(config, null, 2));
+  } catch {
+    // Filesystem may be read-only (e.g. Vercel serverless) — silently skip
+  }
 }

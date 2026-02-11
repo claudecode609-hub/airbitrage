@@ -73,27 +73,52 @@ export async function harvestBuyIntents(): Promise<HarvestResult> {
   const diagnostics: SourceDiagnostic[] = [];
 
   const allSubs = [...HW_FORMAT_SUBS, ...WTB_FORMAT_SUBS];
-  for (const sub of allSubs) {
-    const start = Date.now();
-    try {
-      const intents = await fetchRedditSubreddit(sub);
-      diagnostics.push({
-        source: `r/${sub}`,
-        status: intents.length > 0 ? 'success' : 'empty',
-        itemCount: intents.length,
-        durationMs: Date.now() - start,
-      });
-      allIntents.push(...intents);
-    } catch (err) {
-      diagnostics.push({
-        source: `r/${sub}`,
-        status: 'error',
-        itemCount: 0,
-        durationMs: Date.now() - start,
-        error: err instanceof Error ? err.message : String(err),
-      });
+
+  // Fetch in parallel batches of 4 to stay under Reddit rate limits
+  // but finish much faster than sequential (~3s vs ~8s)
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < allSubs.length; i += BATCH_SIZE) {
+    const batch = allSubs.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(async (sub) => {
+        const start = Date.now();
+        try {
+          const intents = await fetchRedditSubreddit(sub);
+          return {
+            diagnostic: {
+              source: `r/${sub}`,
+              status: (intents.length > 0 ? 'success' : 'empty') as SourceDiagnostic['status'],
+              itemCount: intents.length,
+              durationMs: Date.now() - start,
+            },
+            intents,
+          };
+        } catch (err) {
+          return {
+            diagnostic: {
+              source: `r/${sub}`,
+              status: 'error' as const,
+              itemCount: 0,
+              durationMs: Date.now() - start,
+              error: err instanceof Error ? err.message : String(err),
+            },
+            intents: [] as BuyIntent[],
+          };
+        }
+      }),
+    );
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        diagnostics.push(result.value.diagnostic);
+        allIntents.push(...result.value.intents);
+      }
     }
-    await new Promise(r => setTimeout(r, REDDIT_DELAY_MS));
+
+    // Small delay between batches
+    if (i + BATCH_SIZE < allSubs.length) {
+      await new Promise(r => setTimeout(r, 300));
+    }
   }
 
   // Sort: priced posts first (by price desc), then priceless posts
