@@ -6,6 +6,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { harvestBuyIntents } from '@/agents/buyer-intent/harvester';
 
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const password = request.nextUrl.searchParams.get('p');
   const sitePassword = process.env.SITE_PASSWORD;

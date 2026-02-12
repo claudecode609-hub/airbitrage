@@ -1,9 +1,6 @@
 {
   "functions": {
-    "src/app/api/stream/route.ts": {
-      "maxDuration": 300
-    },
-    "src/app/api/debug/harvest/route.ts": {
+    "src/app/api/**/*.ts": {
       "maxDuration": 60
     }
   }
